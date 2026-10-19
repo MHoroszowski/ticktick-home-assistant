@@ -1,0 +1,115 @@
+# Fork maintenance (MHoroszowski/ticktick-home-assistant). Weekly, and on demand:
+# rebase `personal` (our patches) onto Hantick's main, check it, push it, mirror
+# upstream main to `main`, and cut a vX.Y.Z-mh.N release when the code changed.
+# On a rebase conflict or a failed check nothing is pushed or released, and an issue is opened.
+name: Sync upstream and release
+
+on:
+  schedule:
+    - cron: "23 9 * * 1" # Mondays 09:23 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency: sync-upstream
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      # gh would otherwise pick the `upstream` remote (Hantick) as its repository.
+      GH_REPO: ${{ github.repository }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: personal
+          fetch-depth: 0
+
+      - name: Rebase personal onto upstream/main
+        id: rebase
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/Hantick/ticktick-home-assistant.git
+          git fetch --no-tags upstream main
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "Already on top of upstream/main $(git rev-parse --short upstream/main)."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Upstream has new commits:"; git log --oneline HEAD..upstream/main
+            if ! git rebase upstream/main; then
+              git rebase --abort
+              echo "::error::Rebasing personal onto upstream/main conflicts."
+              exit 1
+            fi
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Compile
+        run: python -m compileall -q custom_components
+
+      - name: Decide on a release
+        id: release
+        run: |
+          base=$(python3 -c 'import json; print(json.load(open("custom_components/ticktick/manifest.json"))["version"])')
+          last=$(git tag --list 'v*-mh.*' --sort=-v:refname | head -n1)
+          # Compare only the integration: workflow or docs changes don't need a release.
+          if [ -n "$last" ] && [ "$(git rev-parse HEAD:custom_components)" = "$(git rev-parse "$last^:custom_components")" ]; then
+            echo "Integration unchanged since $last; no release."
+            echo "needed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          n=$(git tag --list "v${base}-mh.*" | sed "s/^v${base}-mh\.//" | sort -n | tail -n1)
+          version="${base}-mh.$(( ${n:-0} + 1 ))"
+          echo "Releasing v${version} (previous: ${last:-none})."
+          python3 - "$version" <<'PY'
+          import json, sys
+          path = "custom_components/ticktick/manifest.json"
+          manifest = json.load(open(path))
+          manifest["version"] = sys.argv[1]
+          open(path, "w").write(json.dumps(manifest, indent=2) + "\n")
+          PY
+          echo "needed=true" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "last=${last}" >> "$GITHUB_OUTPUT"
+
+      - name: hassfest
+        uses: home-assistant/actions/hassfest@master
+
+      - name: HACS validation
+        uses: hacs/action@main
+        with:
+          category: integration
+          ignore: brands
+
+      - name: Push personal and mirror main
+        if: steps.rebase.outputs.changed == 'true'
+        run: |
+          git push --force-with-lease=personal origin HEAD:refs/heads/personal
+          git push --force origin upstream/main:refs/heads/main
+
+      - name: Tag and publish the release
+        if: steps.release.outputs.needed == 'true'
+        run: |
+          version="${{ steps.release.outputs.version }}"
+          personal=$(git rev-parse HEAD)
+          git commit -qam "release v${version}"
+          git tag -a "v${version}" -m "v${version}"
+          git push origin "v${version}"
+          {
+            echo "Hantick/ticktick-home-assistant \`main\` ($(git rev-parse --short upstream/main)) plus these patches:"
+            echo
+            git log --format='- %s (%h)' upstream/main.."$personal"
+          } > notes.md
+          gh release create "v${version}" --title "v${version}" --notes-file notes.md --latest
+
+      - name: Open an issue on failure
+        if: failure()
+        run: |
+          title="Upstream sync failed"
+          if [ -z "$(gh issue list --state open --search "in:title \"$title\"" --json number --jq '.[0].number')" ]; then
+            gh issue create --title "$title" --body "The weekly sync could not rebase \`personal\` onto Hantick's \`main\`, or a check failed, so nothing was pushed or released. Run log: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}. Fix locally: \`git fetch upstream && git rebase upstream/main\` on \`personal\`, resolve, push, then re-run this workflow."
+          fi
