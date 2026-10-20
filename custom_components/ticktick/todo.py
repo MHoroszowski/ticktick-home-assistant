@@ -71,6 +71,11 @@ def _due_for_ticktick(due: date | datetime | None) -> tuple[datetime | None, boo
     return None, False
 
 
+def _description_field(task: Task | None) -> str:
+    """TickTick shows `desc` on checklist tasks and `content` on the rest."""
+    return "desc" if task is not None and task.kind == "CHECKLIST" else "content"
+
+
 def _map_task(
     item: TodoItem, projectId: str, api_task: Task | None = None
 ) -> tuple[Task, bool]:
@@ -81,8 +86,9 @@ def _map_task(
         if (item.summary or "").strip() != (api_task.title or "").strip():
             api_task.title = item.summary
             modified = True
-        if (item.description or "").strip() != (api_task.content or "").strip():
-            api_task.content = item.description
+        field = _description_field(api_task)
+        if (item.description or "").strip() != (getattr(api_task, field) or "").strip():
+            setattr(api_task, field, item.description)
             modified = True
 
         api_due = _parse_ticktick_datetime(api_task.dueDate)
@@ -158,7 +164,9 @@ class TickTickTodoListEntity(CoordinatorEntity[TickTickCoordinator], TodoListEnt
                             if task.status == TaskStatus.COMPLETED
                             else TodoItemStatus.NEEDS_ACTION,
                             due=_due_from_task(task),
-                            description=task.content or None,  # Don't use empty string
+                            # Don't use empty string
+                            description=getattr(task, _description_field(task))
+                            or None,
                         )
                     )
 
