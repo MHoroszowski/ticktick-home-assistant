@@ -17,7 +17,9 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN
+from .const import CONF_ASSIGNEE_NAMES, DOMAIN
+
+PRIORITY_NAMES = {0: "none", 1: "low", 3: "medium", 5: "high"}
 
 
 async def async_setup_entry(
@@ -69,6 +71,42 @@ def _due_for_ticktick(due: date | datetime | None) -> tuple[datetime | None, boo
         midnight = datetime.combine(due, time(), dt_util.get_default_time_zone())
         return midnight, True
     return None, False
+
+
+def _local_date_or_datetime(value: Any, task: Task) -> date | datetime | None:
+    """Parse a TickTick timestamp; a date for all-day tasks."""
+    parsed = _parse_ticktick_datetime(value)
+    if parsed is None or not task.isAllDay:
+        return parsed
+    zone = dt_util.get_time_zone(task.timeZone) if task.timeZone else None
+    return parsed.astimezone(zone or dt_util.get_default_time_zone()).date()
+
+
+def _task_details(task: Task, assignee_names: dict[str, str]) -> dict[str, Any]:
+    """Summarise a task for the `tasks` state attribute."""
+    raw = getattr(task, "_raw", None) or {}
+    due = _local_date_or_datetime(task.dueDate, task)
+    start = _local_date_or_datetime(task.startDate, task)
+    assignee = raw.get("assigneeUsername")
+    priority = getattr(task.priority, "value", task.priority) or 0
+    items = task.items or []
+    done = sum(1 for item in items if item.status)
+    return {
+        "uid": task.id,
+        "title": task.title,
+        "due": due.isoformat() if due else None,
+        "all_day": bool(task.isAllDay),
+        "start": start.isoformat() if start else None,
+        "section": raw.get("columnName"),
+        "tags": raw.get("tags") or [],
+        "assignee": assignee_names.get(assignee, assignee) if assignee else None,
+        "priority": PRIORITY_NAMES.get(priority, "none"),
+        "recurring": bool(task.repeatFlag),
+        "rrule": task.repeatFlag,
+        "last_done": raw.get("completedTime"),
+        "modified": raw.get("modifiedTime"),
+        "checklist": f"{done}/{len(items)}" if items else None,
+    }
 
 
 def _description_field(task: Task | None) -> str:
@@ -123,6 +161,8 @@ class TickTickTodoListEntity(CoordinatorEntity[TickTickCoordinator], TodoListEnt
         | TodoListEntityFeature.SET_DUE_DATETIME_ON_ITEM
         | TodoListEntityFeature.SET_DESCRIPTION_ON_ITEM
     )
+    # Per-task details change every poll; keep them out of the recorder.
+    _unrecorded_attributes = frozenset({"tasks"})
 
     def __init__(
         self,
@@ -137,6 +177,7 @@ class TickTickTodoListEntity(CoordinatorEntity[TickTickCoordinator], TodoListEnt
         self._attr_unique_id = f"{config_entry_id}-{project_id}"
         self._attr_name = project_name
         self._attr_todo_items = []
+        self._attr_extra_state_attributes = {"tasks": []}
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -148,6 +189,10 @@ class TickTickTodoListEntity(CoordinatorEntity[TickTickCoordinator], TodoListEnt
             self._attr_todo_items = None
         else:
             tasks_to_add = []
+            details = []
+            assignee_names = self.coordinator.config_entry.options.get(
+                CONF_ASSIGNEE_NAMES, {}
+            )
             for project_with_tasks in projects_with_tasks:
                 if (
                     project_with_tasks.project.id != self._project_id
@@ -156,6 +201,8 @@ class TickTickTodoListEntity(CoordinatorEntity[TickTickCoordinator], TodoListEnt
                     continue
 
                 for task in project_with_tasks.tasks:
+                    if task.status != TaskStatus.COMPLETED:
+                        details.append(_task_details(task, assignee_names))
                     tasks_to_add.insert(0,  # noqa: PERF401
                         TodoItem(
                             uid=task.id,
@@ -173,6 +220,7 @@ class TickTickTodoListEntity(CoordinatorEntity[TickTickCoordinator], TodoListEnt
             # Replace even when empty, otherwise the last removed or completed
             # task stays in Home Assistant after the list is cleared (#18).
             self._attr_todo_items = tasks_to_add
+            self._attr_extra_state_attributes = {"tasks": details}
 
         super()._handle_coordinator_update()
 

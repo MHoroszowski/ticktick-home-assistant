@@ -2,6 +2,9 @@
 
 DOMAIN = "ticktick"
 
+# Options: {"user@example.com": "Name"} for showing assignees by name
+CONF_ASSIGNEE_NAMES = "assignee_names"
+
 OAUTH2_AUTHORIZE = "https://ticktick.com/oauth/authorize"
 OAUTH2_TOKEN = "https://ticktick.com/oauth/token"
 TICKTICK_HOST = "api.ticktick.com"

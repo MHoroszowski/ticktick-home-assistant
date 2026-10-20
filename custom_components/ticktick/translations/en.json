@@ -25,5 +25,19 @@
                 "description": "The TickTick access token has expired. Sign in again with the same TickTick account."
             }
         }
+    },
+    "options": {
+        "step": {
+            "init": {
+                "title": "TickTick options",
+                "description": "How tasks show their assignee in the `tasks` attribute of each list.",
+                "data": {
+                    "assignee_names": "Assignee names"
+                },
+                "data_description": {
+                    "assignee_names": "One per line: `user@example.com = Name`. Unlisted assignees show their TickTick username."
+                }
+            }
+        }
     }
 }

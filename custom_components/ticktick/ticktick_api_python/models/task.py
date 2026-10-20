@@ -76,7 +76,7 @@ class Task(CheckListItem):
             return {
                 k: _handle_datetime(v)
                 for k, v in d.items()
-                if v is not None and v != []
+                if v is not None and v != [] and not k.startswith("_")
             }
 
         @staticmethod
@@ -127,7 +127,7 @@ class Task(CheckListItem):
     def from_dict(data: dict) -> "Task":
         """Create a Task instance from a dictionary."""
 
-        return Task(
+        task = Task(
             projectId=data["projectId"],
             title=data.get("title")
             if data.get("title")
@@ -150,3 +150,7 @@ class Task(CheckListItem):
             else [],
             kind=data.get("kind"),
         )
+        # Read-only fields the model doesn't carry (tags, column, assignee, ...).
+        # Underscored attributes are never serialised back to TickTick.
+        task._raw = data
+        return task
